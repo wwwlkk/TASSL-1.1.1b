@@ -23,8 +23,16 @@
 #include <openssl/dh.h>
 #include <openssl/bn.h>
 #include <openssl/md5.h>
+#include <openssl/engine.h>
 
 #define TICKET_NONCE_SIZE       8
+
+
+#ifndef OPENSSL_NO_CNSM
+
+int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret);
+
+#endif
 
 static int tls_construct_encrypted_extensions(SSL *s, WPACKET *pkt);
 
@@ -2879,16 +2887,22 @@ int tls_construct_server_key_exchange(SSL *s, WPACKET *pkt)
             goto err;
           }
           
-        	if (!ssl_add_cert_to_buf(sm2_certs, &sm2_certs_len, (&s->cert->pkeys[SSL_PKEY_ECC_ENC])->x509))
-            goto err;
-        	tbslen = construct_key_exchange_tbs(s, &tbs, sm2_certs ? sm2_certs->data : NULL,
-                                            sm2_certs_len);
+        	if (!ssl_add_cert_to_buf(sm2_certs, &sm2_certs_len, (&s->cert->pkeys[SSL_PKEY_ECC_ENC])->x509)){
+        		if(sm2_certs){
+        		    BUF_MEM_free(sm2_certs);
+        		    goto err;
+        		}
+        	}
+           
+        	tbslen = construct_key_exchange_tbs(s, &tbs, sm2_certs ? sm2_certs->data : NULL, sm2_certs_len);
+        	if(sm2_certs){
+        	    BUF_MEM_free(sm2_certs);
+        	}
         }
         else{
-        	tbslen = construct_key_exchange_tbs(s, &tbs,
-                                            s->init_buf->data + paramoffset,
-                                            paramlen);
+        	tbslen = construct_key_exchange_tbs(s, &tbs, s->init_buf->data + paramoffset, paramlen);
         }
+      
         #else
         
         tbslen = construct_key_exchange_tbs(s, &tbs,
@@ -3073,6 +3087,8 @@ static int tls_process_cke_sm2ecc(SSL *s, PACKET *pkt)
     EVP_PKEY *pkey = NULL;
     
     EVP_PKEY_CTX *pkey_ctx = NULL;
+    ENGINE *local_e_sm4 = NULL;
+    EVP_PKEY * local_evp_ptr = NULL;
 
     pkey = s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey;
     if (pkey == NULL) {
@@ -3091,21 +3107,6 @@ static int tls_process_cke_sm2ecc(SSL *s, PACKET *pkt)
                      SSL_R_LENGTH_MISMATCH);
             goto err;
         }
-    }
-			
-		/*
-     * We must not leak whether a decryption failure occurs because of
-     * Bleichenbacher's attack on PKCS #1 v1.5 RSA padding (see RFC 2246,
-     * section 7.4.7.1). The code follows that advice of the TLS RFC and
-     * generates a random premaster secret for the case that the decrypt
-     * fails. See https://tools.ietf.org/html/rfc5246#section-7.4.7.1
-     */
-
-    if (RAND_priv_bytes(rand_premaster_secret,
-                      sizeof(rand_premaster_secret)) <= 0) {
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PROCESS_CKE_SM2ECC,
-                 ERR_R_INTERNAL_ERROR);
-        goto err;
     }
         
     /* EVP Decrypt Pre Master Secret Key */
@@ -3132,7 +3133,7 @@ static int tls_process_cke_sm2ecc(SSL *s, PACKET *pkt)
         goto err;
     }
 			
-		#ifdef CIPHER_DEBUG
+#ifdef CIPHER_DEBUG
     {
     	int gi = 0;
     	printf("the pre mask key =[");
@@ -3141,21 +3142,32 @@ static int tls_process_cke_sm2ecc(SSL *s, PACKET *pkt)
     	}
     	printf("]\n");
     }
-    #endif
-
+#endif
+    
+    //如果此ssl的私钥加载了sm4引擎，则使用引擎进行masterkey计算
+    local_evp_ptr = s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey;
+    local_e_sm4 = ENGINE_get_cipher_engine(NID_sm4_cbc);
+    if(local_evp_ptr && local_e_sm4 ){        //ECC-SM4-SM3只可能是明文的premasterkey，因为此premasterkey时客户端随机生成加密发送过来的
+        if(!ENGINE_ssl_generate_master_secret(local_e_sm4, s, rand_premaster_secret, sizeof(rand_premaster_secret), 0)){
+            goto err;
+        }
+        
+    }
+    else
     if (!ssl_generate_master_secret(s, rand_premaster_secret,
                                     sizeof(rand_premaster_secret), 0)) {
         /* SSLfatal() already called */
         goto err;
     }
     
-    
-    
     OPENSSL_cleanse(rand_premaster_secret, sizeof(rand_premaster_secret));
 
     ret = 1;
  err:
- 		if(pkey_ctx) EVP_PKEY_CTX_free(pkey_ctx);
+    if(local_e_sm4)
+        ENGINE_finish(local_e_sm4);
+    if(pkey_ctx) 
+        EVP_PKEY_CTX_free(pkey_ctx);
     return ret;
 }
 

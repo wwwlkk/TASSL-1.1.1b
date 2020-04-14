@@ -498,6 +498,12 @@ SSL_CTX_get_recv_max_early_data         498	1_1_1	EXIST::FUNCTION:
 SSL_CTX_set_recv_max_early_data         499	1_1_1	EXIST::FUNCTION:
 SSL_CTX_set_post_handshake_auth         500	1_1_1	EXIST::FUNCTION:
 SSL_get_signature_type_nid              501	1_1_1a	EXIST::FUNCTION:
-SSL_CTX_use_enc_PrivateKey_file         502	1_1_1b	EXIST::FUNCTION:
-CNTLS_client_method                     503	1_1_1b	EXIST::FUNCTION:
-SSL_CTX_check_enc_private_key           504	1_1_1b	EXIST::FUNCTION:
+SSL_set_sm2_group_id_custom             502	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_check_enc_private_key           503	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_use_enc_PrivateKey_file         504	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_use_enc_PrivateKey              505	1_1_1b	EXIST::FUNCTION:CNSM
+CNTLS_client_method                     506	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_set_s3_tmp_pms                      507	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_use_enc_certificate_chain_file  508	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_use_enc_certificate_file        509	1_1_1b	EXIST::FUNCTION:CNSM
+SSL_CTX_use_enc_certificate             510	1_1_1b	EXIST::FUNCTION:CNSM

@@ -14,6 +14,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
+#include <openssl/engine.h>
 
 /* seed1 through seed5 are concatenated */
 static int tls1_PRF(SSL *s,
@@ -344,6 +345,10 @@ int tls1_setup_key_block(SSL *s)
     int mac_type = NID_undef;
     size_t num, mac_secret_size = 0;
     int ret = 0;
+#ifndef OPENSSL_NO_CNSM
+    ENGINE *local_e_sm4 = NULL;
+    EVP_PKEY * local_evp_ptr = NULL;
+#endif
 
     if (s->s3->tmp.key_block_length != 0)
         return 1;
@@ -396,6 +401,19 @@ int tls1_setup_key_block(SSL *s)
                    ((z + 1) % 16) ? ' ' : '\n');
     }
 #endif
+
+#ifndef OPENSSL_NO_CNSM     //如果此ssl的私钥加载了sm4引擎，则调用引擎进行计算keyblock，此时的p为主密钥明文或者密文
+    local_evp_ptr = s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey;
+    local_e_sm4 = ENGINE_get_cipher_engine(NID_sm4_cbc);
+    
+    if(local_evp_ptr && local_e_sm4 ){
+        ENGINE_set_tass_flags(local_e_sm4, TASS_FLAG_SM4_KEY_CIPHER);
+        if(!ENGINE_tls1_generate_key_block(local_e_sm4, s, p, num)){
+            goto err;
+        }
+    }
+    else
+#endif
     if (!tls1_generate_key_block(s, p, num)) {
         /* SSLfatal() already called */
         goto err;
@@ -430,6 +448,10 @@ int tls1_setup_key_block(SSL *s)
 
     ret = 1;
  err:
+#ifndef OPENSSL_NO_CNSM
+    if(local_e_sm4)
+        ENGINE_finish(local_e_sm4);
+#endif
     return ret;
 }
 
@@ -438,6 +460,10 @@ size_t tls1_final_finish_mac(SSL *s, const char *str, size_t slen,
 {
     size_t hashlen;
     unsigned char hash[EVP_MAX_MD_SIZE];
+#ifndef OPENSSL_NO_CNSM
+    ENGINE *local_e_sm4 = NULL;
+    EVP_PKEY * local_evp_ptr = NULL;
+#endif
 
     if (!ssl3_digest_cached_records(s, 0)) {
         /* SSLfatal() already called */
@@ -448,6 +474,17 @@ size_t tls1_final_finish_mac(SSL *s, const char *str, size_t slen,
         /* SSLfatal() already called */
         return 0;
     }
+    
+#ifndef OPENSSL_NO_CNSM
+    //目前sm2暂时不支持计算finish_mac，所以采取把明文masterkey复制到masterkey密文部分，进行此tls1_PRF
+    local_evp_ptr = s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey;
+    local_e_sm4 = ENGINE_get_cipher_engine(NID_sm4_cbc);
+    if(local_evp_ptr && local_e_sm4){
+        memcpy(s->session->master_key, s->session->master_key+48, 48);
+    }
+    if(local_e_sm4)
+        ENGINE_finish(local_e_sm4);
+#endif
 
     if (!tls1_PRF(s, str, slen, hash, hashlen, NULL, 0, NULL, 0, NULL, 0,
                   s->session->master_key, s->session->master_key_length,

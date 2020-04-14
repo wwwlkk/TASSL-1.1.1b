@@ -10,12 +10,14 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <openssl/objects.h>
 #include "internal/nelem.h"
 #include "ssl_locl.h"
 #include <openssl/md5.h>
 #include <openssl/dh.h>
 #include <openssl/rand.h>
+#include <openssl/engine.h>
 #include "internal/cryptlib.h"
 
 #define TLS13_NUM_CIPHERS       OSSL_NELEM(tls13_ciphers)
@@ -4740,9 +4742,18 @@ EVP_PKEY *ssl_generate_pkey(EVP_PKEY *pm)
 {
     EVP_PKEY_CTX *pctx = NULL;
     EVP_PKEY *pkey = NULL;
+#ifndef OPENSSL_NO_CNSM
+    ENGINE *tmp_e = NULL;
+#endif
 
     if (pm == NULL)
         return NULL;
+#ifndef OPENSSL_NO_CNSM
+    tmp_e = ENGINE_get_pkey_meth_engine(NID_sm2);
+    if(tmp_e)
+        pctx = EVP_PKEY_CTX_new(pm, tmp_e);
+    else
+#endif
     pctx = EVP_PKEY_CTX_new(pm, NULL);
     if (pctx == NULL)
         goto err;
@@ -4754,6 +4765,8 @@ EVP_PKEY *ssl_generate_pkey(EVP_PKEY *pm)
     }
 
     err:
+    if(tmp_e)
+        ENGINE_free(tmp_e);
     EVP_PKEY_CTX_free(pctx);
     return pkey;
 }
@@ -4766,6 +4779,10 @@ EVP_PKEY *ssl_generate_pkey_group(SSL *s, uint16_t id)
     const TLS_GROUP_INFO *ginf = tls1_group_id_lookup(id);
     uint16_t gtype;
 
+#ifndef OPENSSL_NO_CNSM
+    ENGINE *e_tmp = NULL;
+#endif
+   
     if (ginf == NULL) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_GENERATE_PKEY_GROUP,
                  ERR_R_INTERNAL_ERROR);
@@ -4773,7 +4790,18 @@ EVP_PKEY *ssl_generate_pkey_group(SSL *s, uint16_t id)
     }
     gtype = ginf->flags & TLS_CURVE_TYPE;
     if (gtype == TLS_CURVE_CUSTOM)
-        pctx = EVP_PKEY_CTX_new_id(ginf->nid, NULL);
+        pctx = EVP_PKEY_CTX_new_id(ginf->nid, NULL); 
+#ifndef OPENSSL_NO_CNSM
+    else if(s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey){
+    	  e_tmp = EVP_PKEY_pmeth_engine(s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey);
+        if(e_tmp){
+            pctx = EVP_PKEY_CTX_new_id(ginf->nid, e_tmp);
+	     gtype |= TLS_CURVE_CUSTOM;
+        }
+	else
+	    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC  , NULL);
+      }       
+#endif
     else
         pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
     if (pctx == NULL) {
@@ -4786,12 +4814,20 @@ EVP_PKEY *ssl_generate_pkey_group(SSL *s, uint16_t id)
                  ERR_R_EVP_LIB);
         goto err;
     }
+
     if (gtype != TLS_CURVE_CUSTOM
             && EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, ginf->nid) <= 0) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_GENERATE_PKEY_GROUP,
                  ERR_R_EVP_LIB);
         goto err;
     }
+#ifndef OPENSSL_NO_CNSM
+    else if (e_tmp && EVP_PKEY_CTX_set_sm2_paramgen_curve_nid(pctx, ginf->nid) <= 0) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_GENERATE_PKEY_GROUP,
+                 ERR_R_EVP_LIB);
+        goto err;
+    }
+#endif
     if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_GENERATE_PKEY_GROUP,
                  ERR_R_EVP_LIB);
@@ -4950,6 +4986,27 @@ typedef struct {
     int encdata_format;
 }EC_PKEY_CTX;
 
+struct evp_pkey_ctx_st {
+    /* Method associated with this operation */
+    const EVP_PKEY_METHOD *pmeth;
+    /* Engine that implements this method or NULL if builtin */
+    ENGINE *engine;
+    /* Key: may be NULL */
+    EVP_PKEY *pkey;
+    /* Peer key for key agreement, may be NULL */
+    EVP_PKEY *peerkey;
+    /* Actual operation */
+    int operation;
+    /* Algorithm specific data */
+    void *data;
+    /* Application specific data */
+    void *app_data;
+    /* Keygen callback */
+    EVP_PKEY_gen_cb *pkey_gencb;
+    /* implementation specific keygen data */
+    int *keygen_info;
+    int keygen_info_count;
+} /* EVP_PKEY_CTX */ ;
 
 int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
 {
@@ -4959,7 +5016,8 @@ int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
     EVP_PKEY_CTX *pctx = NULL;
     EC_PKEY_CTX *dctx = NULL;
     EVP_PKEY *srvr_pub_pkey = NULL;
-    EVP_MD *md = NULL;
+    const EVP_MD *md = NULL;
+    ENGINE *local_e_sm4 = NULL;
 
     if (privkey == NULL || pubkey == NULL) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_DERIVE_SM2,
@@ -4972,7 +5030,7 @@ int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
          SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_DERIVE_SM2,
                    ERR_R_INTERNAL_ERROR);
          goto err;
-    	}
+    }
 
     srvr_pub_pkey = X509_get_pubkey(sk_X509_value(s->session->peer_chain, sk_X509_num(s->session->peer_chain)-1));
     if ((srvr_pub_pkey == NULL) || (EVP_PKEY_id(srvr_pub_pkey) != EVP_PKEY_EC) || (EVP_PKEY_get0_EC_KEY(srvr_pub_pkey) == NULL))
@@ -5007,13 +5065,25 @@ int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
     }
 
     if (EVP_PKEY_derive_init(pctx) <= 0
-        || EVP_PKEY_derive_set_peer(pctx, srvr_pub_pkey) <= 0
-        || EVP_PKEY_derive(pctx, pms, &pmslen) <= 0) {
+        || EVP_PKEY_derive_set_peer(pctx, srvr_pub_pkey) <= 0)  {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_DERIVE_SM2,
+                 ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+    
+    local_e_sm4 = ENGINE_get_cipher_engine(NID_sm4_cbc);        //如果加载了SM4引擎，则协商密文的premasterkey；如果没有加载则协商明文的premasterkey
+    if(local_e_sm4)
+        pctx->app_data = 1;
+    else
+        pctx->app_data = 0;
+        
+    if(EVP_PKEY_derive(pctx, pms, &pmslen) <= 0) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_SSL_DERIVE_SM2,
                  ERR_R_INTERNAL_ERROR);
         goto err;
     }
 
+    
     
     if (gensecret) {
         /* SSLfatal() called as appropriate in the below functions */
@@ -5031,6 +5101,21 @@ int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
 
             rv = rv && tls13_generate_handshake_secret(s, pms, pmslen);
         } else {
+            //如果此ssl的私钥加载了sm2引擎，则使用引擎进行masterkey计算
+            ENGINE *local_e_sm2 = NULL;
+            EVP_PKEY * local_evp_ptr = NULL;
+            local_evp_ptr = s->cert->pkeys[SSL_PKEY_ECC_ENC].privatekey;
+            if(local_evp_ptr)
+                local_e_sm2 = EVP_PKEY_pmeth_engine(local_evp_ptr);
+            if(local_evp_ptr && local_e_sm4){
+                if(local_e_sm2)
+                    ENGINE_set_tass_flags(local_e_sm4, TASS_FLAG_PRE_MASTER_KEY_CIPHER);       //调用SM2引擎的ECDHE-SM4-SM3套件，是密文的premasterkey; 不调用SM2引擎的为明文premasterkey
+                if(!(rv = ENGINE_ssl_generate_master_secret(local_e_sm4, s, pms, pmslen, 0))){
+                    pmslen = 0;
+                    goto err;
+                }
+            }
+            else
             rv = ssl_generate_master_secret(s, pms, pmslen, 0);
         }
     } else {
@@ -5042,6 +5127,10 @@ int ssl_derive_SM2(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,  int gensecret)
     }
 
  err:
+    if(local_e_sm4)
+        ENGINE_finish(local_e_sm4);
+    if(srvr_pub_pkey)
+        EVP_PKEY_free(srvr_pub_pkey);
     OPENSSL_clear_free(pms, pmslen);
     EVP_PKEY_CTX_free(pctx);
     return rv;

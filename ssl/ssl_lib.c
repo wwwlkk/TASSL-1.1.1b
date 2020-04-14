@@ -44,9 +44,10 @@ int ssl_cert_type(X509 *x, EVP_PKEY *pkey)
         ret = SSL_PKEY_DSA_SIGN;
     }
 #ifndef OPENSSL_NO_EC
-    else if (i == EVP_PKEY_EC) {
+		else if (i == EVP_PKEY_EC) {
 # ifndef OPENSSL_NO_CNSM
-        if (EC_GROUP_get_curve_name(EC_KEY_get0_group(EVP_PKEY_get0_EC_KEY(pk))) == NID_sm2)
+    
+	if (EC_GROUP_get_curve_name(EC_KEY_get0_group(EVP_PKEY_get0_EC_KEY(pk))) == NID_sm2)
         {
             if (x && (X509_get_extension_flags(x)& EXFLAG_KUSAGE) && (X509_get_key_usage(x) & (X509v3_KU_KEY_ENCIPHERMENT | X509v3_KU_DATA_ENCIPHERMENT | X509v3_KU_KEY_AGREEMENT)))
                 ret = SSL_PKEY_ECC_ENC;
@@ -4627,6 +4628,14 @@ int SSL_is_server(const SSL *s)
 {
     return s->server;
 }
+
+#ifndef OPENSSL_NO_CNSM
+int SSL_set_s3_tmp_pms(const SSL *s)
+{
+    s->s3->tmp.pms = NULL;
+    return 1;
+}
+#endif
 
 #if OPENSSL_API_COMPAT < 0x10100000L
 void SSL_set_debug(SSL *s, int debug)

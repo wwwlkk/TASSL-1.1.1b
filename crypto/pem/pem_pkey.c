@@ -31,11 +31,20 @@ EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x, pem_password_cb *cb,
     long len;
     int slen;
     EVP_PKEY *ret = NULL;
+#ifndef OPENSSL_NO_CNSM
+    char *reserve_nm = NULL;
+#endif
 
     if (!PEM_bytes_read_bio_secmem(&data, &len, &nm, PEM_STRING_EVP_PKEY, bp,
                                    cb, u))
         return NULL;
     p = data;
+#ifndef OPENSSL_NO_CNSM					//add by gujq on 20190830 for tasshsm engine v0.6
+    reserve_nm = nm;
+    if(strcmp(nm, "TASSHSM EC PRIVATE KEY") == 0 || strcmp(nm, "TASSCARD EC PRIVATE KEY") == 0){
+    	nm = "EC PRIVATE KEY";
+    }
+#endif    	
 
     if (strcmp(nm, PEM_STRING_PKCS8INF) == 0) {
         PKCS8_PRIV_KEY_INFO *p8inf;
@@ -81,11 +90,15 @@ EVP_PKEY *PEM_read_bio_PrivateKey(BIO *bp, EVP_PKEY **x, pem_password_cb *cb,
         ameth = EVP_PKEY_asn1_find_str(NULL, nm, slen);
         if (!ameth || !ameth->old_priv_decode)
             goto p8err;
-        ret = d2i_PrivateKey(ameth->pkey_id, x, &p, len);
+	        ret = d2i_PrivateKey(ameth->pkey_id, x, &p, len);
     }
  p8err:
     if (ret == NULL)
         PEMerr(PEM_F_PEM_READ_BIO_PRIVATEKEY, ERR_R_ASN1_LIB);
+#ifndef OPENSSL_NO_CNSM
+		nm = reserve_nm;
+#endif
+
  err:
     OPENSSL_secure_free(nm);
     OPENSSL_secure_clear_free(data, len);
